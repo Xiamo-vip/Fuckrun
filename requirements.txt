@@ -1,0 +1,5 @@
+mitmproxy==12.2.1
+cryptography==46.0.7
+pywebview==6.2.1
+pythonnet==3.2.1
+pyinstaller==6.19.0

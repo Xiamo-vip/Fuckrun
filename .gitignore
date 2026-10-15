@@ -1,0 +1,35 @@
+# Local dependencies, IDE and generated output
+.vendor/
+.idea/
+__pycache__/
+*.py[cod]
+build/
+dist*/
+*.spec
+payload.zip
+# Personal credentials, capture state and certificates
+config.json
+demo-config.json
+.env
+.env.*
+*.pem
+*.cer
+*.p12
+*.pfx
+mitmproxy/
+# Local-only reports
+CLEANUP_REPORT.json
+PUBLISH_REPORT.json
+VERIFICATION.txt
+DIFF_FILE.patch
+# Keep only source snapshots required by rollback / regression fixtures
+evidence/*
+!evidence/v7/
+!evidence/v3/
+evidence/v7/*
+!evidence/v7/app.py
+!evidence/v7/core.py
+!evidence/v7/proxy_capture.py
+!evidence/v7/test_desktop.py
+evidence/v3/*
+!evidence/v3/map_view.py

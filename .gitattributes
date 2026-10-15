@@ -1,0 +1,3 @@
+# Preserve exact bytes, including rollback snapshot checksums.
+* -text
+*.sh text eol=lf
