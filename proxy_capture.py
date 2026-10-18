@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from core import HOST, STATE, atomic_json, token_text
 
 REG_PATH = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -94,7 +95,38 @@ def guardian(pid, journal):
     ProxyLease(journal=journal).restore()
 
 
-def install_cert(path):
+def certificate_info(path):
+    """Validate the generated CA and return its Windows SHA-1 thumbprint."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    path = Path(path)
+    data = path.read_bytes()
+    # mitmproxy writes ``mitmproxy-ca-cert.cer`` as PEM even though the .cer
+    # extension is also commonly used for DER.  Parsing it as DER unconditionally
+    # raises ValueError and rotate_invalid_ca then deletes a perfectly valid CA,
+    # causing every capture attempt to regenerate and reject the same PEM file.
+    if data.lstrip().startswith(b'-----BEGIN CERTIFICATE-----'):
+        cert = x509.load_pem_x509_certificate(data)
+    else:
+        cert = x509.load_der_x509_certificate(data)
+    expires = cert.not_valid_after_utc if hasattr(cert, 'not_valid_after_utc') else cert.not_valid_after.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc) + timedelta(days=7):
+        raise ValueError('mitmproxy 根证书已过期或即将过期')
+    if not cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+        raise ValueError('mitmproxy 证书不是有效根 CA')
+    return cert.fingerprint(hashes.SHA1()).hex().upper(), expires
+
+
+def certificate_trusted(thumbprint, user=True):
+    args = [str(Path(os.environ['SystemRoot']) / 'System32' / 'certutil.exe')]
+    if user:
+        args.append('-user')
+    args.extend(['-store', 'Root', thumbprint])
+    result = subprocess.run(args, capture_output=True, creationflags=0x08000000)
+    return result.returncode == 0
+
+
+def _install_machine_cert(path):
     # UAC elevation is confined to certutil; the application stays in the user's session.
     from ctypes import wintypes
     class SHELLEXECUTEINFO(ctypes.Structure):
@@ -122,6 +154,43 @@ def install_cert(path):
         raise RuntimeError('证书安装失败，退出码 ' + str(code.value))
 
 
+def install_cert(path):
+    """Trust the CA before enabling the system proxy.
+
+    Chromium-based WeChat reads the current-user root store reliably.  Older
+    builds may read the machine store, so an elevated machine-store fallback is
+    retained.  The proxy is never enabled unless one store verifies the exact
+    generated certificate thumbprint.
+    """
+    thumbprint, expires = certificate_info(path)
+    if certificate_trusted(thumbprint, user=True) or certificate_trusted(thumbprint, user=False):
+        return {'thumbprint': thumbprint, 'expires': expires.isoformat(), 'store': 'existing'}
+    certutil = str(Path(os.environ['SystemRoot']) / 'System32' / 'certutil.exe')
+    current = subprocess.run([certutil, '-user', '-addstore', '-f', 'Root', str(path)],
+                             capture_output=True, creationflags=0x08000000)
+    if current.returncode == 0 and certificate_trusted(thumbprint, user=True):
+        return {'thumbprint': thumbprint, 'expires': expires.isoformat(), 'store': 'CurrentUser'}
+    _install_machine_cert(path)
+    if not certificate_trusted(thumbprint, user=False):
+        raise RuntimeError('根证书安装后未通过 Windows 信任验证；系统代理尚未启用')
+    return {'thumbprint': thumbprint, 'expires': expires.isoformat(), 'store': 'LocalMachine'}
+
+
+def rotate_invalid_ca(confdir):
+    """Remove only an unusable mitmproxy CA set so mitmproxy can regenerate it."""
+    cert = Path(confdir) / 'mitmproxy-ca-cert.cer'
+    if not cert.exists():
+        return False
+    try:
+        certificate_info(cert)
+        return False
+    except Exception:
+        for path in Path(confdir).glob('mitmproxy-ca*'):
+            if path.is_file():
+                path.unlink()
+        return True
+
+
 def extract_token(host, header):
     if host.lower().rstrip('.') != HOST or not header or not header.lower().startswith('bearer '):
         return None
@@ -129,6 +198,37 @@ def extract_token(host, header):
         return token_text(header)
     except ValueError:
         return None
+
+
+def proxy_option_values(confdir):
+    """Return only options supported by the pinned mitmproxy release."""
+    return {'listen_host': '127.0.0.1', 'listen_port': 8080,
+            'confdir': str(confdir),
+            'allow_hosts': [r'^campusrun\.mzwu\.edu\.cn(?::\d+)?$']}
+
+
+def proxy_options(confdir, options_type=None):
+    """Build options supported by current mitmproxy releases.
+
+    ``connection_strategy`` was removed in mitmproxy 12. Passing it to
+    ``Options`` raises ``KeyError`` before the certificate or proxy is ready.
+    We use ``update_defer`` so that any option name unknown to the installed
+    mitmproxy version is silently deferred instead of raising ``KeyError``.
+    """
+    if options_type is None:
+        from mitmproxy.options import Options
+        options_type = Options
+    opts = options_type()
+    values = proxy_option_values(confdir)
+    if hasattr(opts, 'update_defer'):
+        opts.update_defer(**values)
+    else:
+        # Very old mitmproxy without update_defer — try update_known first.
+        if hasattr(opts, 'update_known'):
+            opts.update_known(**values)
+        else:
+            opts.update(**values)
+    return opts
 
 
 class Capture:
@@ -152,6 +252,10 @@ class Capture:
     def _worker(self):
         try:
             asyncio.run(self._run())
+        except KeyError as exc:
+            self.emit('error', '抓取失败：mitmproxy 配置项不兼容（' + str(exc) + '）；请升级 mitmproxy 或检查版本')
+        except ImportError as exc:
+            self.emit('error', '抓取失败：缺少依赖（' + str(exc) + '）；请检查 mitmproxy 及其依赖是否正确安装')
         except Exception as exc:
             # Do not expose requests, headers or credentials in error messages.
             self.emit('error', '抓取失败：' + type(exc).__name__ + '；请检查端口、证书或手动填写')
@@ -163,7 +267,6 @@ class Capture:
                 self.emit('error', '代理恢复未完成，请点击恢复代理；备份日志已保留')
 
     async def _run(self):
-        from mitmproxy.options import Options
         from mitmproxy.tools.dump import DumpMaster
         owner = self
         captured = []
@@ -181,8 +284,10 @@ class Capture:
 
         confdir = STATE / 'mitmproxy'
         confdir.mkdir(parents=True, exist_ok=True)
-        options = Options(listen_host='127.0.0.1', listen_port=8080, confdir=str(confdir),
-                          allow_hosts=[r'^campusrun\.mzwu\.edu\.cn(?::\d+)?$'])
+        rotated = rotate_invalid_ca(confdir)
+        if rotated:
+            self.emit('status', '检测到失效的旧证书，正在重新生成；系统代理尚未启用')
+        options = proxy_options(confdir)
         self.master = DumpMaster(options, with_termlog=False, with_dumper=False)
         self.master.addons.add(Listener())
         task = asyncio.create_task(self.master.run())
@@ -199,8 +304,9 @@ class Capture:
                 await asyncio.sleep(0.1)
             if not cert.exists() or not ready.is_set():
                 raise RuntimeError('证书生成超时')
-            self.emit('status', '正在申请安装 mitmproxy 根证书，请处理 Windows 提示')
-            await asyncio.to_thread(install_cert, cert)
+            self.emit('status', '正在验证 mitmproxy 根证书；验证完成前不会修改系统代理')
+            cert_status = await asyncio.to_thread(install_cert, cert)
+            self.emit('certificate_ready', '根证书已在 Windows '+cert_status['store']+' 信任库验证；现在可以启动抓取')
             if self.cancel.is_set():
                 return
             # Guardian starts before any registry modifications.

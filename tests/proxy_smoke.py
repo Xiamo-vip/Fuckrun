@@ -9,6 +9,7 @@ from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy import http
 from proxy_capture import extract_token
+from proxy_capture import certificate_info
 
 
 async def main():
@@ -28,6 +29,10 @@ async def main():
         task=asyncio.create_task(master.run())
         try:
             await asyncio.wait_for(ready.wait(),15)
+            cert_path = Path(directory) / 'mitmproxy-ca-cert.cer'
+            thumbprint, expires = certificate_info(cert_path)
+            assert len(thumbprint) == 40, thumbprint
+            assert expires is not None
             reader,writer=await asyncio.open_connection('127.0.0.1',18081)
             writer.write(b'GET http://campusrun.mzwu.edu.cn/api/fixture HTTP/1.1\r\nHost: campusrun.mzwu.edu.cn\r\nAuthorization: Bearer SYNTHETIC_TOKEN\r\nConnection: close\r\n\r\n')
             await writer.drain()
@@ -36,7 +41,7 @@ async def main():
             await writer.wait_closed()
             assert b'LOCAL_FIXTURE_OK' in output,output
             assert captured==['SYNTHETIC_TOKEN'],captured
-            print('PROXY_SMOKE_OK: local listener, exact-host Bearer extraction, mock response, clean shutdown')
+            print('PROXY_SMOKE_OK: local listener, PEM CA validation, exact-host Bearer extraction, mock response, clean shutdown')
         finally:
             master.shutdown()
             await task

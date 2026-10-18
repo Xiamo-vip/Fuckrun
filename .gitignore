@@ -1,6 +1,7 @@
 # Local dependencies, IDE and generated output
 .vendor/
 .idea/
+.codex-artifacts/
 __pycache__/
 *.py[cod]
 build/

@@ -6,18 +6,24 @@ const runtime = fs.readFileSync(path.join(__dirname,'..','map_runtime.js'),'utf8
 
 function fixture(config, sdk=true) {
   const status = {};
-  const draws = {bounds:0, markers:0, timers:[]};
+  const mapNode = {};
+  const draws = {routes:0, markers:0, timers:[]};
   const context = {console, clearTimeout(){},setTimeout(fn){draws.timers.push(fn);return 1;},
-    document:{getElementById(){return status;},createElement(){return {};},
-              head:{appendChild(script){draws.script=script;}}}};
+    requestAnimationFrame(fn){fn();},Event:class {},addEventListener(){},dispatchEvent(){},
+    document:{getElementById(id){return id==='status'?status:mapNode;},createElement(){return {};},
+              addEventListener(){},head:{appendChild(script){draws.script=script;}}}};
   context.window=context;
   context.GHOSTRUNNER_PLAN=config;
   if(sdk) context.TMap={
     LatLng:class {constructor(lat,lng){this.lat=lat;this.lng=lng;}},
-    Map:class {fitBounds(bounds){assert(bounds);draws.fit=true;} on(){}},
-    PolylineStyle:class {},MultiPolyline:class {},MarkerStyle:class {},
-    MultiMarker:class {constructor(opts){draws.markers=opts.geometries.length;}},
-    LatLngBounds:class {constructor(sw,ne){if(!sw||!ne)throw Error('sw/ne required');draws.bounds++;}extend(){}}
+    Map:class {constructor(node){assert.strictEqual(node,mapNode);} setCenter(){draws.center=true;} setZoom(){draws.zoom=true;} on(){}},
+    PolylineStyle:class {},
+    MultiPolyline:class {constructor(opts){
+      if(opts.styles) throw new TypeError("Cannot read properties of null (reading 'getItem')");
+      draws.routes++; assert.equal(opts.geometries[0].paths.length,2);
+    }},
+    MarkerStyle:class {},
+    MultiMarker:class {constructor(opts){draws.markers=opts.geometries.length;}}
   };
   vm.createContext(context);
   return {context,status,draws};
@@ -34,7 +40,7 @@ if(process.argv[2]==='--baseline') {
 }
 let f=fixture(config);vm.runInContext(runtime,f.context);
 assert.equal(f.context.GHOSTRUNNER_MAP_STATE.state,'ready');
-assert.equal(f.draws.bounds,1);assert.equal(f.draws.markers,1);assert(f.draws.fit);
+assert.equal(f.draws.routes,1);assert.equal(f.draws.markers,1);assert(f.draws.center);assert(f.draws.zoom);
 f=fixture({...config,points:[[NaN,118]]});vm.runInContext(runtime,f.context);
 assert.equal(f.context.GHOSTRUNNER_MAP_STATE.state,'render-error');
 assert(f.status.textContent.includes('无效经纬度'));
@@ -46,4 +52,4 @@ f=fixture(config,false);vm.runInContext(runtime,f.context);f.draws.script.onload
 assert.equal(f.context.GHOSTRUNNER_MAP_STATE.state,'sdk-error');
 f=fixture(config,false);vm.runInContext(runtime,f.context);f.draws.timers[0]();
 assert.equal(f.context.GHOSTRUNNER_MAP_STATE.state,'timeout');
-console.log('MAP_RUNTIME_OK: 6 cases; explicit bounds, checkpoint markers, distinct rendering/network/key/timeout errors');
+console.log('MAP_RUNTIME_OK: 6 cases; stable SDK, getItem style fallback, manual viewport, markers, distinct errors');
