@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,8 @@ sys.path.insert(0, str(ROOT))
 
 from map_view import map_html
 from updater import is_newer, latest_release, version_tuple
-from proxy_capture import certificate_info, proxy_option_values, proxy_options, rotate_invalid_ca
+from proxy_capture import (capture_error_message, certificate_info, certificate_status,
+                           proxy_option_values, proxy_options, repair_certificate, rotate_invalid_ca)
 
 
 class MaterialInterfaceTests(unittest.TestCase):
@@ -36,6 +38,8 @@ class MaterialInterfaceTests(unittest.TestCase):
         self.assertNotIn('Tkinter', qml)
         self.assertIn('settings.localStorageEnabled: true', qml)
         self.assertNotIn('settings.localStorageEnabled: false', qml)
+        for label in ('验证证书', '安装证书', '一键修复', '安装并验证'):
+            self.assertIn(label, qml)
 
     def test_map_document_has_full_viewport_and_resize_hook(self):
         html = map_html('SYNTHETIC', [[25, 118], [25.001, 118.001]], [])
@@ -75,6 +79,47 @@ class UpdateTests(unittest.TestCase):
 
 
 class CertificatePreflightTests(unittest.TestCase):
+    def test_missing_and_untrusted_certificate_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = certificate_status(directory, trust_checker=lambda *_args, **_kwargs: False)
+            self.assertEqual(missing['state'], 'missing')
+            self.assertFalse(missing['ok'])
+
+    def test_capture_error_keeps_known_setup_reason_but_hides_unknown_details(self):
+        self.assertIn('端口 8080', capture_error_message(OSError(10048, 'occupied')))
+        self.assertIn('代理启动失败', capture_error_message(RuntimeError('代理启动失败')))
+        message = capture_error_message(RuntimeError('Authorization: Bearer SECRET'))
+        self.assertNotIn('SECRET', message)
+        self.assertIn('一键修复', message)
+
+    def test_repair_backs_up_and_regenerates_ca_without_enabling_proxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            confdir, backups = root / 'conf', root / 'backups'
+            confdir.mkdir()
+            (confdir / 'mitmproxy-ca-cert.cer').write_bytes(b'broken-certificate')
+            (confdir / 'mitmproxy-ca.pem').write_bytes(b'broken-private-set')
+            trusted = {'ok': True, 'state': 'trusted', 'message': '已验证'}
+            with patch('proxy_capture.install_cert', return_value={'store': 'CurrentUser'}), \
+                 patch('proxy_capture.certificate_status', return_value=trusted):
+                result = repair_certificate(confdir, backups)
+            backup = Path(result['backup'])
+            self.assertEqual((backup / 'mitmproxy-ca-cert.cer').read_bytes(), b'broken-certificate')
+            self.assertEqual((backup / 'mitmproxy-ca.pem').read_bytes(), b'broken-private-set')
+            thumbprint, _ = certificate_info(confdir / 'mitmproxy-ca-cert.cer')
+            self.assertEqual(len(thumbprint), 40)
+
+    def test_repair_restores_original_files_when_installation_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            confdir = root / 'conf'
+            confdir.mkdir()
+            original = b'original-ca-set'
+            (confdir / 'mitmproxy-ca.pem').write_bytes(original)
+            with patch('proxy_capture.install_certificate', side_effect=RuntimeError('证书安装失败')):
+                with self.assertRaises(RuntimeError):
+                    repair_certificate(confdir, root / 'backups')
+            self.assertEqual((confdir / 'mitmproxy-ca.pem').read_bytes(), original)
     def test_proxy_option_shape_rejects_removed_mitmproxy_setting(self):
         """proxy_options must silently defer unknown option names instead of
         raising KeyError, so that cross-version mitmproxy compatibility works."""

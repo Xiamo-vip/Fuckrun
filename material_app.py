@@ -29,7 +29,7 @@ from core import (
     valid_record,
 )
 from map_view import map_html
-from proxy_capture import Capture, ProxyLease
+from proxy_capture import Capture, ProxyLease, certificate_status, install_certificate, repair_certificate
 from running import RunSession, generate_plan, jitter_config, target_km
 from updater import latest_release
 
@@ -95,6 +95,7 @@ class Backend(QObject):
         self.capture = None
         self.capture_deadline = None
         self.capture_phase = "idle"
+        self.certificate_busy = False
         self.route = None
         self.checkpoints = []
         self.variant = 0
@@ -127,6 +128,8 @@ class Backend(QObject):
             "captureStatus": "等待启动",
             "captureRemaining": "准备完成后开始计时",
             "captureActive": False,
+            "certificateBusy": False,
+            "certificateStatus": "尚未验证证书",
             "mapUrl": "",
             "tasktoken": self.settings.data.get("tasktoken", ""),
             "tencentKey": self.settings.data.get("tencent_key", DEFAULT_TENCENT_KEY),
@@ -171,6 +174,8 @@ class Backend(QObject):
     captureStatus = Property(str, lambda s: s._get("captureStatus"), notify=stateChanged)
     captureRemaining = Property(str, lambda s: s._get("captureRemaining"), notify=stateChanged)
     captureActive = Property(bool, lambda s: s._get("captureActive"), notify=stateChanged)
+    certificateBusy = Property(bool, lambda s: s._get("certificateBusy"), notify=stateChanged)
+    certificateStatus = Property(str, lambda s: s._get("certificateStatus"), notify=stateChanged)
     mapUrl = Property(str, lambda s: s._get("mapUrl"), notify=stateChanged)
     tasktoken = Property(str, lambda s: s._get("tasktoken"), notify=stateChanged)
     tencentKey = Property(str, lambda s: s._get("tencentKey"), notify=stateChanged)
@@ -453,6 +458,38 @@ class Backend(QObject):
         except Exception as exc:
             self.errorRaised.emit("恢复失败", f"{exc}\n备份日志仍保留在 {STATE}")
 
+    def _certificate_action(self, action):
+        if self.demo:
+            self._set(certificateStatus="离线预览不会修改 Windows 证书存储。")
+            return
+        if self.certificate_busy or self._state["captureActive"]:
+            self.infoRaised.emit("证书维护", "请先等待当前证书操作完成或停止抓取。")
+            return
+        labels = {"verify": "正在验证证书…", "install": "正在生成并安装证书…", "repair": "正在备份、重建、安装并验证证书…"}
+        self.certificate_busy = True
+        self._set(certificateBusy=True, certificateStatus=labels[action], status=labels[action])
+
+        def work():
+            try:
+                result = certificate_status() if action == "verify" else install_certificate() if action == "install" else repair_certificate()
+                self.emit("certificate_maintenance", (action, result, None))
+            except Exception as exc:
+                self.emit("certificate_maintenance", (action, None, str(exc) or type(exc).__name__))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot()
+    def verifyCertificate(self):
+        self._certificate_action("verify")
+
+    @Slot()
+    def installCertificate(self):
+        self._certificate_action("install")
+
+    @Slot()
+    def repairCertificate(self):
+        self._certificate_action("repair")
+
     def _append_request_log(self, data):
         request_id = data["request_id"]
         phase = data["phase"]
@@ -496,6 +533,20 @@ class Backend(QObject):
                 elif event == "certificate_ready":
                     self._set(captureTitle="证书已验证，准备连接微信", captureStatus=value,
                               captureRemaining="系统代理尚未启用" if self.capture_phase == "preparing" else self._state["captureRemaining"])
+                elif event == "certificate_maintenance":
+                    action, result, error = value
+                    self.certificate_busy = False
+                    if error:
+                        message = "证书操作失败：" + error
+                        self._set(certificateBusy=False, certificateStatus=message, status=message)
+                        self.errorRaised.emit("mitmproxy 证书", message)
+                    else:
+                        message = result["message"]
+                        if action == "repair" and result.get("backup"):
+                            message += " 原证书已备份。"
+                        self._set(certificateBusy=False, certificateStatus=message, status=message)
+                        if result.get("ok"):
+                            self.infoRaised.emit("mitmproxy 证书", message)
                 elif event == "capture_waiting":
                     self.capture_phase = "waiting"
                     self.capture_deadline = time.monotonic() + value["timeout"]

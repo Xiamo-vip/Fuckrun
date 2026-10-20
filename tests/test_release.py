@@ -4,7 +4,7 @@ import unittest
 from core import Settings,APP_VERSION,DEFAULT_TENCENT_KEY,DEFAULT_KEY_NOTICE
 class ReleaseTests(unittest.TestCase):
     def test_version_and_notice(self):
-        self.assertEqual(APP_VERSION,'1.0.1')
+        self.assertEqual(APP_VERSION,'1.0.2')
         self.assertIn('未来可能无法使用',DEFAULT_KEY_NOTICE)
         self.assertIn('自行申请',DEFAULT_KEY_NOTICE)
     def test_new_config_default_key(self):

@@ -394,6 +394,23 @@ QQC.ApplicationWindow {
                             }
                         }
                         BodyText { text: Backend.captureStatus; Layout.fillWidth: true }
+                        MD3.Card {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 112
+                            type: "outlined"
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                spacing: 10
+                                BodyText { text: "证书状态：" + Backend.certificateStatus; Layout.fillWidth: true }
+                                RowLayout {
+                                    spacing: 10
+                                    MD3.Button { text: "验证证书"; type: "outlined"; enabled: !Backend.certificateBusy && !Backend.captureActive; onClicked: Backend.verifyCertificate() }
+                                    MD3.Button { text: Backend.certificateBusy ? "处理中…" : "安装证书"; type: "filled"; enabled: !Backend.certificateBusy && !Backend.captureActive; onClicked: certificateInstallPopup.open() }
+                                    MD3.Button { text: "一键修复"; type: "text"; enabled: !Backend.certificateBusy && !Backend.captureActive; onClicked: certificateRepairPopup.open() }
+                                }
+                            }
+                        }
                         MD3.LinearProgress { Layout.fillWidth: true; indeterminate: Backend.captureActive }
                         BodyText { text: Backend.captureRemaining }
                         RowLayout {
@@ -498,6 +515,42 @@ QQC.ApplicationWindow {
                 Item { Layout.fillWidth: true }
                 MD3.Button { text: "取消"; type: "text"; onClicked: captureConfirmPopup.close() }
                 MD3.Button { text: "继续"; type: "filled"; onClicked: { captureConfirmPopup.close(); window.pageIndex = 5; Backend.startCapture() } }
+            }
+        }
+        padding: 26
+    }
+
+    QQC.Popup {
+        id: certificateInstallPopup
+        anchors.centerIn: parent
+        width: 560
+        modal: true
+        background: MD3.Card { type: "elevated" }
+        contentItem: ColumnLayout {
+            spacing: 16
+            SectionTitle { text: "安装 mitmproxy 根证书？"; font.pixelSize: 22 }
+            BodyText { text: "程序会生成专用根证书并添加到 Windows 信任存储；此操作不会启用系统代理。"; Layout.fillWidth: true }
+            RowLayout { Layout.fillWidth: true; Item { Layout.fillWidth: true }
+                MD3.Button { text: "取消"; type: "text"; onClicked: certificateInstallPopup.close() }
+                MD3.Button { text: "安装并验证"; type: "filled"; onClicked: { certificateInstallPopup.close(); Backend.installCertificate() } }
+            }
+        }
+        padding: 26
+    }
+
+    QQC.Popup {
+        id: certificateRepairPopup
+        anchors.centerIn: parent
+        width: 590
+        modal: true
+        background: MD3.Card { type: "elevated" }
+        contentItem: ColumnLayout {
+            spacing: 16
+            SectionTitle { text: "修复 mitmproxy 证书？"; font.pixelSize: 22 }
+            BodyText { text: "程序会先备份现有 CA 文件，再重新生成、安装并验证新证书；失败时自动恢复原文件。此操作不会启用系统代理。"; Layout.fillWidth: true }
+            RowLayout { Layout.fillWidth: true; Item { Layout.fillWidth: true }
+                MD3.Button { text: "取消"; type: "text"; onClicked: certificateRepairPopup.close() }
+                MD3.Button { text: "开始修复"; type: "filled"; onClicked: { certificateRepairPopup.close(); Backend.repairCertificate() } }
             }
         }
         padding: 26

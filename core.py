@@ -10,7 +10,7 @@ import urllib.error
 HOST = 'campusrun.mzwu.edu.cn'
 BASE = 'https://' + HOST + '/api'
 CONFIG = Path.home() / 'config.json'
-APP_VERSION = '1.0.1'
+APP_VERSION = '1.0.2'
 DEFAULT_TENCENT_KEY = 'JXIBZ-7IQ6I-AJPGJ-UZFYM-NSBRO-YQFPT'
 DEFAULT_KEY_NOTICE = '内置腾讯 Key 未来可能无法使用，建议自行申请并在“设置”中替换。'
 STATE = Path(os.environ.get('GHOSTRUNNER_STATE_DIR') or (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GhostRunner'))
@@ -60,7 +60,7 @@ class AuthExpired(Exception):
 
 
 def get_json(url, token=None):
-    headers = {'Accept': 'application/json', 'User-Agent': 'GhostRunnerDesktop/1.0.1'}
+    headers = {'Accept': 'application/json', 'User-Agent': 'GhostRunnerDesktop/1.0.2'}
     if token:
         headers['Authorization'] = 'Bearer ' + token_text(token)
     # Explicitly bypass system proxy for application API calls.

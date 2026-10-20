@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import shutil
 from datetime import datetime, timedelta, timezone
 from core import HOST, STATE, atomic_json, token_text
 
@@ -15,6 +16,8 @@ REG_PATH = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 NAMES = ('ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL', 'AutoDetect')
 JOURNAL = STATE / 'proxy-backup.json'
 LOCK = threading.RLock()
+CERT_DIR = STATE / 'mitmproxy'
+CERT_FILE = CERT_DIR / 'mitmproxy-ca-cert.cer'
 
 
 def command(*args):
@@ -122,8 +125,87 @@ def certificate_trusted(thumbprint, user=True):
     if user:
         args.append('-user')
     args.extend(['-store', 'Root', thumbprint])
-    result = subprocess.run(args, capture_output=True, creationflags=0x08000000)
+    result = subprocess.run(args, capture_output=True, creationflags=0x08000000, timeout=20)
     return result.returncode == 0
+
+
+def certificate_status(confdir=CERT_DIR, trust_checker=certificate_trusted):
+    """Return a read-only diagnosis without changing proxy or trust settings."""
+    cert = Path(confdir) / 'mitmproxy-ca-cert.cer'
+    if not cert.exists():
+        return {'ok': False, 'state': 'missing', 'message': '未找到 mitmproxy 根证书，请点击“安装证书”。'}
+    try:
+        thumbprint, expires = certificate_info(cert)
+    except (OSError, ValueError) as exc:
+        return {'ok': False, 'state': 'invalid', 'message': f'证书文件无效：{exc}。请点击“一键修复”。'}
+    user = trust_checker(thumbprint, user=True)
+    machine = trust_checker(thumbprint, user=False)
+    if not (user or machine):
+        return {'ok': False, 'state': 'untrusted', 'thumbprint': thumbprint,
+                'expires': expires.isoformat(), 'message': '证书文件有效，但 Windows 尚未信任；请点击“安装证书”。'}
+    store = '当前用户' if user else '本地计算机'
+    return {'ok': True, 'state': 'trusted', 'thumbprint': thumbprint,
+            'expires': expires.isoformat(), 'store': store,
+            'message': f'证书有效并已受信任（{store}，指纹 …{thumbprint[-8:]}）。'}
+
+
+def ensure_certificate(confdir=CERT_DIR):
+    """Create the mitmproxy CA files without starting a proxy listener."""
+    confdir = Path(confdir)
+    confdir.mkdir(parents=True, exist_ok=True)
+    cert = confdir / 'mitmproxy-ca-cert.cer'
+    if cert.exists():
+        certificate_info(cert)
+        return cert
+    from mitmproxy.certs import CertStore
+    CertStore.from_store(confdir, 'mitmproxy', 2048)
+    if not cert.exists():
+        raise RuntimeError('mitmproxy 未生成根证书文件')
+    certificate_info(cert)
+    return cert
+
+
+def install_certificate(confdir=CERT_DIR):
+    cert = ensure_certificate(confdir)
+    result = install_cert(cert)
+    status = certificate_status(confdir)
+    if not status['ok']:
+        raise RuntimeError(status['message'])
+    return status | {'installed_store': result['store']}
+
+
+def repair_certificate(confdir=CERT_DIR, backup_root=None):
+    """Back up the CA set, regenerate it, install it, and verify exact trust."""
+    confdir = Path(confdir)
+    backup_root = Path(backup_root or (STATE / 'certificate-backups'))
+    backup = backup_root / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    backup.mkdir(parents=True, exist_ok=False)
+    for path in confdir.glob('mitmproxy-ca*') if confdir.exists() else ():
+        if path.is_file():
+            shutil.copy2(path, backup / path.name)
+            path.unlink()
+    try:
+        status = install_certificate(confdir)
+    except Exception:
+        for path in confdir.glob('mitmproxy-ca*') if confdir.exists() else ():
+            if path.is_file():
+                path.unlink()
+        for path in backup.iterdir():
+            shutil.copy2(path, confdir / path.name)
+        raise
+    return status | {'backup': str(backup)}
+
+
+def capture_error_message(exc):
+    """Translate known local setup failures without exposing request data."""
+    if isinstance(exc, OSError) and 10048 in (getattr(exc, 'winerror', None), getattr(exc, 'errno', None)):
+        return '抓取失败：端口 8080 已被占用，请关闭占用程序后重试。'
+    message = str(exc).strip()
+    if isinstance(exc, (RuntimeError, ValueError)) and message:
+        allowed = ('证书', '根 CA', '代理', '端口', 'mitmproxy')
+        if any(word in message for word in allowed):
+            return '抓取失败：' + message
+    return '抓取失败：' + type(exc).__name__ + '；请先点击“验证证书”，仍失败再点击“一键修复”。'
 
 
 def _install_machine_cert(path):
@@ -258,7 +340,7 @@ class Capture:
             self.emit('error', '抓取失败：缺少依赖（' + str(exc) + '）；请检查 mitmproxy 及其依赖是否正确安装')
         except Exception as exc:
             # Do not expose requests, headers or credentials in error messages.
-            self.emit('error', '抓取失败：' + type(exc).__name__ + '；请检查端口、证书或手动填写')
+            self.emit('error', capture_error_message(exc))
         finally:
             try:
                 self.lease.restore()
@@ -282,7 +364,7 @@ class Capture:
                 ready.set()
                 owner.emit('proxy_ready', None)
 
-        confdir = STATE / 'mitmproxy'
+        confdir = CERT_DIR
         confdir.mkdir(parents=True, exist_ok=True)
         rotated = rotate_invalid_ca(confdir)
         if rotated:
